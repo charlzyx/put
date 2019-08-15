@@ -1,14 +1,41 @@
 /**
- * ## 尝试一个 immer 的 lowb 实现
+ * ## immer 不可变的核心思路的简单实现
+ * -------------------------------------------------------------------------------------
+ * changelog
+ * -------------------------------------------------------------------------------------
  * - v0.1
  *  - 不考虑 es5
  *  - 不考虑 scope (嵌套使用)
  *  - 不考虑 Promise
  *  - 不考虑 柯理化
  *  - 不考虑 patches
- *  - 不考虑 Set/Map/Promise/function/Regexp等复杂对象, 只做能被 JSON.stringify 格式化的对象
+ *  - 不考虑 Set/Map/Promise/function/Regexp 等复杂对象
  *  - 不考虑 循环引用
  *  - 目标: 实现源数据不修改, 按需变动
+ * ------------------------------------------
+ * - v0.2
+ *  - bugfix: get(): 修复获取原型链方法
+ *  - bugfix: mark(): 设值的时候, assign 写反了
+ *  - doc: 添加文档
+ *
+ * -------------------------------------------------------------------------------------
+ * 核心解读
+ * -------------------------------------------------------------------------------------
+ * - **按需代理** 遍历数据数据节点, 将访问(get)到的值(可能是copy)转换成 proxy(state),
+ * 可以将转换后的想象成 AST 树, 是比较类似的, 后续再详细解释这里
+ * [TODO]: 解释这个 proxy(state)树
+ * 举个栗子: * `data.a.b = 2` 会触发 key: 'a' 的 get, key: 'b' 的 set
+ * ------------------------------------------
+ * - **copy to write** 真正的数据变动都是在 copy 对象上触发的, 每次 set 的时候,
+ * 父级必定是被 get 中 proxy 的拦截(set/delete) 过的, 参考上方栗子; 然后在拦截方法中
+ * 将要做的改动设置到 state.copy 上, 同时递归告诉父节点当前变动, 通过 assign 将自己的
+ * copy 变动合并到父级 copy
+ * 划重点!!! [有个非常晦涩隐秘的引用传值]
+ * 在 get 中 state.drafts =? state.copy
+ * 在 set 中 state.copy = assign(shallowCopy(state.base), state.drafts)
+ * ------------------------------------------
+ * - **finish** 最终读取值就比较简单了, 遍历key, 如果发现是 proxy(state) 就读取 copy
+ * 然后深度递归, 就ok了
  */
 
 /** 一个特殊标记 */
@@ -25,6 +52,15 @@ const shallowCopy = (source) => {
   return Array.isArray(source) ? Object.assign([], source) : Object.assign({}, source);
 }
 
+/**
+ * 判断能不能创建 proxy
+ * - 不能的
+ *   - 包含循环引用的对象
+ *   - 复杂对象
+ * - 能的
+ *   - 数组
+ *   - 简单值
+ */
 const canIProxy = (x) => {
   if (x === null) return false;
   // 数组, 可以代理
@@ -44,11 +80,11 @@ const canIProxy = (x) => {
 
   // 只有 plan Object 很显然
   if (t === 'object' && Reflect.getPrototypeOf(x) === Object.prototype) {
-  /**
-    * 因为 proxy 的创建是 lazy 的, 所以并不是修改所对应的引用
-    * 所以在 循环引用的对象上表现并不符合预期, immer 也是不接受
-    * 这种数据类型, 所以我们就简单的直接引用拷贝, 给出报错就行
-    */
+    /**
+      * 因为 proxy 的创建是 lazy 的, 所以并不是修改所对应的引用
+      * 所以在 循环引用的对象上表现并不符合预期, immer 也是不接受
+      * 这种数据类型, 所以我们就简单的直接引用拷贝, 给出报错就行
+      */
     try {
       JSON.stringify(x);
       return true;
@@ -82,6 +118,7 @@ function mark(state) {
   if (!state.modified) {
     state.modified = true;
 
+    /** 引用 copy, 这里需要好好理解 */
     state.copy = Object.assign(shallowCopy(state.base), state.drafts);
     delete state.copy[DRAFT_STATE];
 
@@ -112,11 +149,11 @@ function source(state) {
  * - base: 原始数据
  * - copy: 拷贝
  * - modified: 是否修改
- * - finalized: 是否结束, 其实在这个简陋版里面用处不大
+ * - finalized: 是否结束, 在没有 scope 的情况下, 貌似不重要
  * - revoke: 我们创建的是一个可撤销的 Proxy, 所以撤销方法挂一下
  *
  * 亮点是:
- * - [lazy] get 的时候, 对要访问的节点生成 这种 state 对象
+ * - [lazy] get 的时候, 对要访问的节点生成 这种 state proxy 对象
  * - [copy] set/delete 的时候, 将目标节点的改动同步到 copy 上
  *
  * --------------------------------------------
